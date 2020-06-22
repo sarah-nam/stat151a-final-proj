@@ -1,0 +1,328 @@
+---
+title: "stat151a final proj"
+author: "Sarah Nam"
+date: "12/10/2019"
+output:
+  pdf_document: default
+  html_document: default
+---
+# STAT 151A Final Project
+## Part 1: Data Exploration and Feature Creation
+```{r}
+library(leaps)
+library(dplyr)
+library(ggplot2)
+library(rcompanion)
+library(leaps)
+library(glmnet)
+library(caret)
+library(car)
+```
+
+```{r}
+# Loading the data
+load(url("http://www.stat.berkeley.edu/users/nolan/data/baseball2012.rda"))
+```
+
+### Q1: Making the variables from Fox
+```{r}
+# career batting average
+baseball$AVG <- baseball$H/baseball$AB 
+# career on-base percentage
+baseball$OBP <- 100*(baseball$H + baseball$CBB)/(baseball$AB + baseball$CBB) 
+# at-base percentage per year
+baseball$YAB <- baseball$CAB / baseball$years
+# hits per year
+baseball$YH <- baseball$CH/baseball$years 
+# home runs per year
+baseball$YHR <- baseball$CHR/baseball$years
+# runs per year
+baseball$YR <- baseball$CR/baseball$years 
+# runs batted in per year
+baseball$YRBI <- baseball$CRBI/baseball$years 
+
+# Creating dummy variables
+baseball$MI <- as.numeric(baseball$POS == 'SS' | baseball$POS == '2B' | baseball$POS == '12' | baseball$POS == '23')
+baseball$C <- as.numeric(baseball$POS == 'C')
+baseball$OF <- as.numeric(baseball$POS == 'OF') + (baseball$POS == 'OS') + (baseball$POS == 'O3')
+baseball$SA <- as.numeric(baseball$years <= 5 & baseball$years >= 3)
+baseball$FA <- as.numeric(baseball$years >= 6)
+```
+
+### Q4: Removing rows with NA salary values
+```{r}
+baseball <- baseball[!is.na(baseball$salary),]
+
+# Removing unneeded columns
+baseball <- baseball[-c(1:6)]
+baseball <- subset(baseball, select = -c(POS, G_batting))
+```
+
+### Q2: Exploratory Plotting
+```{r}
+plot(baseball$CRBI, baseball$salary)
+plot(baseball$CRBI, log(baseball$salary))
+midfielders <- baseball[baseball$MI == 1,]
+outfielders <- baseball[baseball$OF == 1,]
+catcher <- baseball[baseball$C == 1,]
+
+newbies <- baseball[baseball$SA == 0 & baseball$FA == 0,]
+intermediate <- baseball[baseball$SA == 1,]
+pros <- baseball[baseball$FA == 1,]
+
+# Black is 0-2 years, red is 3-5, and green is 6+ years.
+ggplot(NULL, aes(x=CRBI, y=salary)) + 
+      geom_point(data = newbies, aes(color='black')) +
+      geom_point(data = intermediate, aes(color='red')) +
+      geom_point(data = pros, aes(color='green')) + 
+      ggtitle('Salary and CRBI, by years dummy variables') +
+      scale_color_identity(breaks = c("black", "red", "green"),
+                          labels = c("0-2 years", "3-5 years", "6+ years"),
+                          guide = "legend")
+
+# Yellow is midfielders, blue is outfielders, and magenta is catchers.
+ggplot(NULL, aes(x=CRBI, y=salary)) + 
+      geom_point(data = midfielders, aes(color='yellow')) +
+      geom_point(data = outfielders, aes(color='blue'))+
+      geom_point(data = catcher, aes(color='magenta')) +
+      ggtitle('Salary and CRBI, by position dummy variables') + 
+      scale_color_identity(breaks = c("yellow", "blue", "magenta"),
+                          labels = c("Midfielders", "Outfielders", "Catcher"),
+                          guide = "legend")
+```
+
+### Q3: Transforming variables
+```{r}
+raw_salary <- baseball$salary
+baseball$salary <- log(baseball$salary)
+baseball$years <- log(baseball$years+ 1)
+baseball$CR <- log(baseball$CR + 1)
+
+# Testing if transformation stabilized the variance of 
+# the salary by a Q-Q plot of the residuals
+loglm <- lm(baseball$salary ~ baseball$AVG + baseball$OBP + baseball$YAB + baseball$years)
+rawlm <- lm(raw_salary ~ baseball$AVG + baseball$OBP + baseball$YAB + baseball$years)
+qqnorm(residuals(rawlm), ylab='Raw Salary')
+qqnorm(residuals(loglm), ylab='Log Salary')
+
+```
+
+
+It is clear that taking the log of the salaries makes the residuals more normal when fitting a linear model according to the Q-Q plots.
+
+##Part 2: Data Analysis
+### Q1 : Simple Linear Model
+```{r}
+# After fitting the model and checking influential points, 
+# I decided to take the log of career runs because it 
+# reduced the disproportionate influence of a couple points.
+linmod <- lm(salary ~ SA + FA + CR + SA:CR + FA:CR, data=baseball)
+linsum <- summary(linmod)
+
+plot(baseball[baseball$FA == 1,]$CR, baseball[baseball$FA == 1,]$salary, col='red',
+     main = "Salary against Career Runs for Players with 6+ years", 
+     xlab="Log Career Runs", ylab='Log Salary')
+plot(baseball[baseball$SA == 1,]$CR, baseball[baseball$SA == 1,]$salary,
+     col='blue', 
+     main = "Salary against Career Runs for Players with 3-5 years", xlab="Log Career Runs", ylab='Log Salary')
+plot(baseball[baseball$SA == 0 & baseball$FA == 0,]$CR, baseball[baseball$SA == 0 & baseball$FA == 0,]$salary, col='purple', 
+     main = "Salary against Career Runs for Players with 0-2 years", 
+     xlab="Log Career Runs", ylab='Log Salary')
+```
+
+
+Something I realized about the model while doing some exploratory data analysis is that the players who have been in the league for 3-5 years have a completely different curve from those who have been in the league for over 6 years. The players who have been in the league for 6+ years seem to have a linear relationship between salary and career runs, where as the pattern is not clear in those for 3-5 years. The pattern is really not there for players who have been in the league for under 3 years and there seem to be some outliers in both groups from less than 3 years and 3-5 years. 
+This makes me feel that this model will not do a good job predicting or explaining the relationship for any player who has been in the league for under 6 years.
+
+However, this might also show the importance of the interaction terms in this model. The interaction terms may be able to explain the relationships that a simple model cannot. 
+
+### Q2: Outliers, Leverage Points, and Influential Observations
+```{r}
+# Finding leverage points with Hat matrix based on model
+X <- matrix(c(rep(1,421),baseball$SA, baseball$FA, baseball$CR,
+          baseball$SA*baseball$CR, baseball$FA*baseball$CR),421,6)
+H <- X%*%solve(t(X)%*%X)%*%t(X)
+h <- diag(H)
+
+# Getting top 10 largest values of h from baseball data.
+baseball[which(h >= sort(h, decreasing=TRUE)[10]),c('salary', 'SA', 'FA', 'CR')]
+
+# Plotting to visualize.
+cols <- rep('black', nrow(baseball))
+cols[c(which(h >= sort(h, decreasing=TRUE)[10]))] <- 'magenta'
+plot(c(1:nrow(baseball)), h, col = cols, 
+     main="Hat Matrix Values from Model", xlab='Index')
+
+# A line at the h value cutoff, using 3 times mean because 2 times mean is too small.
+h_co <- 3*(6/nrow(baseball))
+abline(h_co, 0)
+```
+
+
+Taking the log of the Career Runs definitely reduced the number of high leverage points and stabilized the variance. It seems like the points of high leverage tend to have lower career runs values. It doesn't seem like any of them are significantly different from other points in salary values. 
+
+```{r}
+# Finding outliers with studentized residuals.
+
+# Calculating Studentized residuals
+S_E2 <- sum(linmod$res^2)/(nrow(baseball)-2)
+standE <- linmod$res/(sqrt(S_E2)*sqrt(1-h))
+studE <- standE*sqrt((nrow(baseball)-6-1)/(nrow(baseball)-6-standE^2))
+Emax <- max(abs(studE))
+
+# Getting the top 10 values and calculating the cutoff according to Fox 11.
+baseball[which(studE >= sort(studE, decreasing=TRUE)[10]),c('salary', 'SA', 'FA', 'CR')]
+
+# Plotting to visualize
+cols <- rep('black', nrow(baseball))
+cols[c(which(abs(studE) >= sort(abs(studE), decreasing=TRUE)[10]))] <- 'red'
+plot(baseball$CR, baseball$salary, col = cols, main="Salary vs Career Runs with High Studentized Residual Values Colored", xlab='Career Runs', ylab='Salary')
+plot(c(1:nrow(baseball)), studE, col = cols, main='Studentized Residual Values', xlab='Index')
+abline(0, 0)
+abline(2, 0)
+abline(-2, 0)
+
+# Bonferroni's Inequality Adjustment
+Emax <- max(abs(studE))
+p1 <- 1-pt(Emax, nrow(baseball)-5-2)
+ptrue <- 2*nrow(baseball)*p1
+ptrue
+```
+
+
+It seems like the points that are marked as outliers have low salaries compared to their career runs or high salaries compared to their career runs. It might also signify people with few years of experience with very high salaries and vice versa.
+
+After applying the Bonferroni adjustment, it seems that at least the value with the greatest Studentized residual is likely to be an outlier. the outlier analysis reveals that the career runs and years in the major league may not be the best explanatory variables to use to predict salary.
+
+Many points land outside the (-2, 2) range suggested by Fox in 11.5.2.
+
+```{r}
+# Finding influential observations using Cook's distance.
+D <- ((standE^2)/6)*(h/(1-h))
+sort(D, decreasing = TRUE)[1:10]
+baseball[which(D >= sort(D, decreasing=TRUE)[10]),c('salary', 'SA', 'FA', 'CR')]
+
+Dmax <- max(D)
+# The 10 points with greatest D have been colored
+cols <- rep('black', nrow(baseball))
+cols[c(which(D >= sort(D, decreasing=TRUE)[10]))] <- 'forest green'
+plot(c(1:nrow(baseball)), D, col = cols, main="Cook's Distance", xlab="Index")
+
+# A line at the Cook's distance cutoff.
+D_co <- 4/(nrow(baseball)-5-1)
+abline(D_co, 0)
+```
+
+
+The Cook's distance cutoff seems like it might be best, as it is a balance of the hat matrix values and the Studentized residuals. It also assigns many points as being influential according to the cutoff D value established by Fox in 11.5.3.
+
+```{r}
+influencePlot(linmod)
+```
+
+
+A bubble plot was created to visualize all of the influence statistics together. The size of the "bubble" is proportional to the value of Cook's distance. Taking the log of the career runs in the original data set made the number of influential points decrease significantly however, perhaps better explaining the linear relationship.
+
+### Q3: Model on All Explanatory Variables
+```{r}
+# Fitting the new model.
+allvar <- lm(salary ~ ., data=baseball)
+allsum <- summary(allvar)
+
+# Plotting a random selection of continuous variables to show correlation
+plot(baseball[,c(1, 2, 3, 4)])
+plot(baseball[,c(35, 36, 37, 38)])
+```
+Plotting even a couple of the variables (excluding dummy variables) resulted in high correlation, according to the linear realtionships in the plots shown. 
+
+### Q4: 10 Best Models of Each Size
+```{r}
+best10 <- regsubsets(salary ~ ., data = baseball, nbest=10, nvmax = 30, method = "exhaustive")
+best10_sum <- summary(best10)
+```
+
+### Q5: Using BIC to choose the Best 5
+```{r}
+plot(best10_sum$bic, xlab = "Number of Variables (Index)", ylab = "BIC", main='BIC Curve of All Models')
+plot(best10, scale = "bic", main="All Models from Exhaustive Search")
+top_5 <- best10_sum$which[best10_sum$bic <= sort(best10_sum$bic, decreasing=FALSE)[5],]
+top_5_df <- data.frame("model" = top_5, "BIC" = sort(best10_sum$bic, decreasing=FALSE)[1:5])
+```
+
+
+According to a plot of the BIC, it seems that the best model is at about 10 variables. The indices are difficult to read, but it seems like if I floor divide each by 10, it tells me the number of variables in that model.
+This makes sense since BIC penalizes models that have more variables, so all the models with 10 variables have a BIC score less than that of those with 11 variables in the top 5. 
+
+Selecting the 5 models with the lowest BIC values revealed 3 models with 10 variables and 2 with 11. Assuming that the BICs are sorted in increasing order, the models are returned in increasing BIC order already. The models with 10 variables have the lowest BICs and include most of the same variables with the exception of a few. The top two models only differ in two variables. The different between the BICs are very small in comparison to their magnitude. 
+
+### Q6: 10-Fold Cross Validation to Rank Top 5 Models
+```{r}
+# Cross validation code borrowed from lab 13
+permutation <- sample(1:nrow(baseball))
+folds <- createFolds(baseball$salary, k = 10, list = TRUE, returnTrain = FALSE)
+X <- model.matrix(salary ~ ., baseball)
+avg_test_MSE <- rep(0,5)
+#loop over models of each size
+for(i in 1:5){
+  test_MSE <- rep(0,10)
+  #loop over folds
+    for(j in 1:10){
+      #identify training and test sets
+      idx_test <- folds[[j]]
+      idx_train <- permutation[!permutation%in%idx_test]
+      #extract which variables to use from regfit 
+      vars <- top_5[i,]
+      X_best_subset <- X[,vars]
+      mod <- lm(baseball$salary ~ X_best_subset - 1, subset = idx_train)
+      X_test <- X_best_subset[idx_test,]
+      test_predictions <- X_test %*% as.matrix(coef(mod))
+      test_MSE[j] <- mean((baseball$salary[idx_test] - test_predictions)^2)
+    }
+  avg_test_MSE[i] <- mean(test_MSE)
+}
+avg_test_MSE
+
+top_5_df$MSE <- avg_test_MSE
+top_5_df['MSE']
+```
+
+
+According to the MSE, the model with 11 variables had the smallest MSE. This makes sense since adding more variables will always decrease the RSS, which is proportional to the MSE. So the models that contain more variables will always perform better with regards to MSE. 
+
+### Q7: Using LASSO to Fit the Model
+```{r}
+# Borrowed code from lab 13 again!
+X <- model.matrix(salary ~ ., baseball)[,-1]
+y <- baseball$salary
+
+# Fitting for comparison
+ols_mod <- lm(y ~ X)
+
+# Fit lasso path over lambda.grid
+lasso_mod <- glmnet(x = X, y = y, alpha = 1)
+
+# Cross validated lasso 
+cv_lasso_mod <- cv.glmnet(x = X, y = y, alpha = 1, nfolds = 10)
+plot(cv_lasso_mod)
+
+# Choosing the best lambda as the one that gives the minimum cross-validation error
+best_lasso_lam <- cv_lasso_mod$lambda.min
+
+# Plot the lasso path on the lambda scale and add a line for the values at best lambda
+plot(lasso_mod, xvar = "lambda")
+lines(c(log(best_lasso_lam), log(best_lasso_lam)), c(-1000, 1000), lty = "dashed", lwd = 3)
+
+best_lasso_coefs <- predict(lasso_mod, type = 'coefficients', s = best_lasso_lam)
+best_lasso_coefs
+
+# Minimum out of sample MSE for lasso
+min(cv_lasso_mod$cvm)
+```
+
+
+It seems that Lasso does not give as small of a MSE as the cross-validation MSE. The MSE from Lasso was greater than the MSE of all 5 models from selection based on BIC.
+Only 9 of the variables end up with a coefficient of 0, but many of the variables have very small coefficients. 
+Only 3 of the variables end up with a coefficient greater than .1. Out of those variables (excluding the intercept), years was included in the Lasso best model but none of the top 5 (with lowest BIC) from regsubsets. FA, which also had coefficient greater than .1, was included in all 5 of the best regsubsets models. 
+This goes to show that the two model selection methods have very different selection criteria, and in this case the BIC models performed better in terms of MSE. 
+
+
